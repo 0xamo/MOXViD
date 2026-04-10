@@ -47,8 +47,6 @@ const manifest = {
   catalogs: [],
 };
 
-const PUBLIC_BASE_URL = process.env.PUBLIC_URL || `http://127.0.0.1:${PORT}`;
-
 let dynamicUrlsCache = null;
 
 function sendJson(res, statusCode, payload) {
@@ -595,20 +593,31 @@ function decodeUrlParam(value) {
   return Buffer.from(String(value || ""), "base64url").toString("utf8");
 }
 
-function buildMoxMergedPlaylistUrl({ videoUrl, audioTracks, quality }) {
+function getPublicBaseUrl(req) {
+  if (process.env.PUBLIC_URL) {
+    return process.env.PUBLIC_URL.replace(/\/+$/, "");
+  }
+  const forwardedProto = req?.headers?.["x-forwarded-proto"];
+  const forwardedHost = req?.headers?.["x-forwarded-host"];
+  const host = forwardedHost || req?.headers?.host || `127.0.0.1:${PORT}`;
+  const proto = forwardedProto || (String(host).includes("127.0.0.1") || String(host).includes("localhost") ? "http" : "https");
+  return `${proto}://${host}`.replace(/\/+$/, "");
+}
+
+function buildMoxMergedPlaylistUrl({ videoUrl, audioTracks, quality, publicBaseUrl }) {
   const params = new URLSearchParams({
     video: encodeUrlParam(videoUrl),
     audios: encodeUrlParam(JSON.stringify(audioTracks || [])),
     quality: String(quality),
   });
-  return `${PUBLIC_BASE_URL}/hls/mox.m3u8?${params.toString()}`;
+  return `${publicBaseUrl}/hls/mox.m3u8?${params.toString()}`;
 }
 
-function buildAnimeCloudProxyUrl(targetUrl) {
+function buildAnimeCloudProxyUrl(targetUrl, publicBaseUrl) {
   const params = new URLSearchParams({
     url: encodeUrlParam(targetUrl),
   });
-  return `${PUBLIC_BASE_URL}/proxy/animecloud.mp4?${params.toString()}`;
+  return `${publicBaseUrl}/proxy/animecloud.mp4?${params.toString()}`;
 }
 
 function buildSingleVariantMasterPlaylist({ videoUrl, audioTracks, quality }) {
@@ -660,7 +669,7 @@ function buildSingleVariantMasterPlaylist({ videoUrl, audioTracks, quality }) {
   ].join("\n");
 }
 
-async function getNoTorrentStreams(imdbId, mediaType, season, episode) {
+async function getNoTorrentStreams(imdbId, mediaType, season, episode, publicBaseUrl) {
   const url =
     mediaType === "movie"
       ? `${NOTORRENT_API}/stream/movie/${encodeURIComponent(imdbId)}.json`
@@ -739,6 +748,7 @@ async function getNoTorrentStreams(imdbId, mediaType, season, episode) {
                 isDefault: !!track.isDefault,
               })),
               quality: variant.quality,
+              publicBaseUrl,
             }),
             variant.quality,
             {
@@ -1476,7 +1486,7 @@ async function getWitAnimeStreams(tmdbId, mediaType, season, episode, imdbId) {
   return [];
 }
 
-async function getAnimeCloudStreams(tmdbId, mediaType, season, episode) {
+async function getAnimeCloudStreams(tmdbId, mediaType, season, episode, publicBaseUrl) {
   const url = `${ANIMECLOUD_BACKEND}?tmdbId=${encodeURIComponent(tmdbId)}&mediaType=${encodeURIComponent(
     mediaType === "movie" ? "movie" : "tv"
   )}&season=${encodeURIComponent(Number(season || 1))}&episode=${encodeURIComponent(
@@ -1486,7 +1496,7 @@ async function getAnimeCloudStreams(tmdbId, mediaType, season, episode) {
   return normalizeForeignStreams("AnimeCloud", payload?.streams || []).map((stream) => ({
     ...stream,
     title: stream.title === "Auto" ? "Auto MP4" : `${stream.title} MP4`,
-    url: buildAnimeCloudProxyUrl(stream.url),
+    url: buildAnimeCloudProxyUrl(stream.url, publicBaseUrl),
     behaviorHints: {
       ...(stream.behaviorHints || {}),
       notWebReady: false,
@@ -2183,7 +2193,7 @@ function stripHtml(text) {
   return String(text || "").replace(/<[^>]+>/g, "").trim();
 }
 
-async function gatherStreams({ imdbId, mediaType, season, episode }) {
+async function gatherStreams({ imdbId, mediaType, season, episode, publicBaseUrl }) {
   const tmdb = await resolveMediaContext(imdbId, mediaType);
   const cinemetaMeta =
     !tmdb.isKitsu && mediaType === "series"
@@ -2214,7 +2224,7 @@ async function gatherStreams({ imdbId, mediaType, season, episode }) {
     {
       name: "NoTorrent",
       run: () =>
-        canUseImdbSources ? getNoTorrentStreams(imdbId, mediaType, season, episode) : [],
+        canUseImdbSources ? getNoTorrentStreams(imdbId, mediaType, season, episode, publicBaseUrl) : [],
     },
     {
       name: "VidLink",
@@ -2225,7 +2235,7 @@ async function gatherStreams({ imdbId, mediaType, season, episode }) {
       name: "AnimeCloud",
       run: () =>
         canUseTmdbSources && isAnime
-          ? getAnimeCloudStreams(tmdb.tmdbId, mediaType, season, episode)
+          ? getAnimeCloudStreams(tmdb.tmdbId, mediaType, season, episode, publicBaseUrl)
           : [],
     },
     {
@@ -2287,11 +2297,12 @@ async function gatherStreams({ imdbId, mediaType, season, episode }) {
   };
 }
 
-async function handleMovieStreamRequest(res, movieId) {
+async function handleMovieStreamRequest(req, res, movieId) {
   try {
     const payload = await gatherStreams({
       imdbId: movieId,
       mediaType: "movie",
+      publicBaseUrl: getPublicBaseUrl(req),
     });
     sendJson(res, 200, {
       streams: payload.streams,
@@ -2305,13 +2316,14 @@ async function handleMovieStreamRequest(res, movieId) {
   }
 }
 
-async function handleSeriesStreamRequest(res, seriesId, season, episode) {
+async function handleSeriesStreamRequest(req, res, seriesId, season, episode) {
   try {
     const payload = await gatherStreams({
       imdbId: seriesId,
       mediaType: "series",
       season,
       episode,
+      publicBaseUrl: getPublicBaseUrl(req),
     });
     sendJson(res, 200, {
       streams: payload.streams,
@@ -2325,15 +2337,16 @@ async function handleSeriesStreamRequest(res, seriesId, season, episode) {
   }
 }
 
-async function handleAnimeStreamRequest(res, animeId, season, episode) {
-  await handleSeriesStreamRequest(res, animeId, season, episode);
+async function handleAnimeStreamRequest(req, res, animeId, season, episode) {
+  await handleSeriesStreamRequest(req, res, animeId, season, episode);
 }
 
-async function handleMovieDebugRequest(res, movieId) {
+async function handleMovieDebugRequest(req, res, movieId) {
   try {
     const payload = await gatherStreams({
       imdbId: movieId,
       mediaType: "movie",
+      publicBaseUrl: getPublicBaseUrl(req),
     });
     sendJson(res, 200, payload);
   } catch (error) {
@@ -2343,13 +2356,14 @@ async function handleMovieDebugRequest(res, movieId) {
   }
 }
 
-async function handleSeriesDebugRequest(res, seriesId, season, episode) {
+async function handleSeriesDebugRequest(req, res, seriesId, season, episode) {
   try {
     const payload = await gatherStreams({
       imdbId: seriesId,
       mediaType: "series",
       season,
       episode,
+      publicBaseUrl: getPublicBaseUrl(req),
     });
     sendJson(res, 200, payload);
   } catch (error) {
@@ -2359,8 +2373,8 @@ async function handleSeriesDebugRequest(res, seriesId, season, episode) {
   }
 }
 
-async function handleAnimeDebugRequest(res, animeId, season, episode) {
-  await handleSeriesDebugRequest(res, animeId, season, episode);
+async function handleAnimeDebugRequest(req, res, animeId, season, episode) {
+  await handleSeriesDebugRequest(req, res, animeId, season, episode);
 }
 
 function handleMoxHlsRequest(res, requestUrl) {
@@ -2509,7 +2523,7 @@ const server = http.createServer(async (req, res) => {
 
     const streamMovieMatch = requestUrl.pathname.match(/^\/stream\/movie\/([^/]+)\.json$/);
     if (streamMovieMatch) {
-      await handleMovieStreamRequest(res, decodeURIComponent(streamMovieMatch[1]));
+      await handleMovieStreamRequest(req, res, decodeURIComponent(streamMovieMatch[1]));
       return;
     }
 
@@ -2523,6 +2537,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       await handleSeriesStreamRequest(
+        req,
         res,
         parsed.imdbId,
         parsed.season,
@@ -2541,6 +2556,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       await handleAnimeStreamRequest(
+        req,
         res,
         parsed.imdbId,
         parsed.season,
@@ -2551,7 +2567,7 @@ const server = http.createServer(async (req, res) => {
 
     const debugMovieMatch = requestUrl.pathname.match(/^\/debug\/movie\/([^/]+)\.json$/);
     if (debugMovieMatch) {
-      await handleMovieDebugRequest(res, decodeURIComponent(debugMovieMatch[1]));
+      await handleMovieDebugRequest(req, res, decodeURIComponent(debugMovieMatch[1]));
       return;
     }
 
@@ -2563,6 +2579,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       await handleSeriesDebugRequest(
+        req,
         res,
         parsed.imdbId,
         parsed.season,
@@ -2579,6 +2596,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       await handleAnimeDebugRequest(
+        req,
         res,
         parsed.imdbId,
         parsed.season,
