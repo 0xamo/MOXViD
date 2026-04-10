@@ -3,7 +3,7 @@ const http = require("http");
 const PORT = Number(process.env.PORT || 7005);
 const HOST = process.env.HOST || "0.0.0.0";
 const USER_AGENT =
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 const TMDB_API_KEY =
   process.env.TMDB_API_KEY || "e6333b32409e02a4a6eba6fb7ff866bb";
 const TMDB_FALLBACK_API_KEY = "439c478a771f35c05022f9feabcca01c";
@@ -620,6 +620,13 @@ function buildAnimeCloudProxyUrl(targetUrl, publicBaseUrl) {
   return `${publicBaseUrl}/proxy/animecloud.mp4?${params.toString()}`;
 }
 
+function buildVidLinkProxyUrl(targetUrl, publicBaseUrl) {
+  const params = new URLSearchParams({
+    url: encodeUrlParam(targetUrl),
+  });
+  return `${publicBaseUrl}/proxy/vidlink.m3u8?${params.toString()}`;
+}
+
 function buildSingleVariantMasterPlaylist({ videoUrl, audioTracks, quality }) {
   const bandwidthMap = {
     1080: 6000000,
@@ -802,7 +809,7 @@ async function getNoTorrentStreams(imdbId, mediaType, season, episode, publicBas
   return streams;
 }
 
-async function getVidLinkStreams(tmdbId, mediaType, season, episode) {
+async function getVidLinkStreams(tmdbId, mediaType, season, episode, publicBaseUrl) {
   const encoded = await fetchJson(
     `${MULTI_DECRYPT_API}/enc-vidlink?text=${encodeURIComponent(tmdbId)}`
   );
@@ -814,6 +821,9 @@ async function getVidLinkStreams(tmdbId, mediaType, season, episode) {
     Connection: "keep-alive",
     Referer: `${VIDLINK_API}/`,
     Origin: VIDLINK_API,
+    Accept: "application/json,*/*",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate",
   };
 
   const apiUrl =
@@ -822,6 +832,34 @@ async function getVidLinkStreams(tmdbId, mediaType, season, episode) {
       : `${VIDLINK_API}/api/b/tv/${token}/${season}/${episode}`;
 
   const payload = await fetchJson(apiUrl, { headers });
+  const externalUrl =
+    mediaType === "movie"
+      ? `${VIDLINK_API}/movie/${tmdbId}`
+      : `${VIDLINK_API}/tv/${tmdbId}/${season}/${episode}`;
+
+  const qualityMap = payload?.stream?.qualities;
+  const qualityStreams = [];
+  if (qualityMap && typeof qualityMap === "object") {
+    for (const [key, value] of Object.entries(qualityMap)) {
+      const streamUrl = value?.url;
+      if (!streamUrl) continue;
+      const normalizedQuality =
+        String(key).match(/(\d{3,4})/)?.[1] || parseQualityFromText(key) || parseQualityFromText(value?.quality);
+      qualityStreams.push(
+        buildStream(
+          "VidLink",
+          normalizedQuality ? `${normalizedQuality}p` : "Auto",
+          buildVidLinkProxyUrl(streamUrl, publicBaseUrl),
+          normalizedQuality ? Number(normalizedQuality) : null,
+          { externalUrl }
+        )
+      );
+    }
+  }
+  if (qualityStreams.length) {
+    return qualityStreams.sort((a, b) => (b.quality || 0) - (a.quality || 0));
+  }
+
   const playlist = payload?.stream?.playlist;
   if (!playlist) throw new Error("VidLink playlist not found");
 
@@ -831,32 +869,65 @@ async function getVidLinkStreams(tmdbId, mediaType, season, episode) {
       buildStream(
         "VidLink",
         variant.quality ? `${variant.quality}p` : "Auto",
-        variant.url,
+        buildVidLinkProxyUrl(variant.url, publicBaseUrl),
         variant.quality,
-        {
-          externalUrl:
-            mediaType === "movie"
-              ? `${VIDLINK_API}/movie/${tmdbId}`
-              : `${VIDLINK_API}/tv/${tmdbId}/${season}/${episode}`,
-        }
+        { externalUrl }
       )
     );
   }
 
-  return [
-    buildStream(
-      "VidLink",
-      "Auto",
-      playlist,
-      null,
-      {
-        externalUrl:
-          mediaType === "movie"
-            ? `${VIDLINK_API}/movie/${tmdbId}`
-            : `${VIDLINK_API}/tv/${tmdbId}/${season}/${episode}`,
+  return [buildStream("VidLink", "Auto", buildVidLinkProxyUrl(playlist, publicBaseUrl), null, { externalUrl })];
+}
+
+function extractVidLinkRequestHeaders(targetUrl) {
+  try {
+    const parsed = new URL(targetUrl);
+    const rawHeaders = parsed.searchParams.get("headers");
+    const requestHeaders = rawHeaders ? JSON.parse(rawHeaders) : {};
+    return Object.fromEntries(
+      Object.entries(requestHeaders || {})
+        .filter(([, value]) => typeof value === "string" && value)
+        .map(([key, value]) => [String(key), String(value)])
+    );
+  } catch (_) {
+    return {};
+  }
+}
+
+function buildAbsoluteProxyUrl(baseUrl, relativeUrl, publicBaseUrl) {
+  const absolute = new URL(relativeUrl, baseUrl);
+  const base = new URL(baseUrl);
+  const isRelative = !/^https?:/i.test(String(relativeUrl || ""));
+  if (
+    isRelative &&
+    !absolute.search &&
+    base.searchParams.has("headers")
+  ) {
+    absolute.searchParams.set("headers", base.searchParams.get("headers"));
+  }
+  if (
+    isRelative &&
+    !absolute.searchParams.has("host") &&
+    base.searchParams.has("host")
+  ) {
+    absolute.searchParams.set("host", base.searchParams.get("host"));
+  }
+  return buildVidLinkProxyUrl(absolute.toString(), publicBaseUrl);
+}
+
+function rewriteM3u8ForProxy(playlist, baseUrl, publicBaseUrl) {
+  return playlist
+    .split(/\r?\n/)
+    .map((line) => {
+      if (!line || line.startsWith("#")) {
+        const uriMatch = line.match(/URI="([^"]+)"/);
+        if (!uriMatch) return line;
+        const proxied = buildAbsoluteProxyUrl(baseUrl, uriMatch[1], publicBaseUrl);
+        return line.replace(uriMatch[1], proxied);
       }
-    ),
-  ];
+      return buildAbsoluteProxyUrl(baseUrl, line, publicBaseUrl);
+    })
+    .join("\n");
 }
 
 function base64ToBytes(base64) {
@@ -2229,7 +2300,9 @@ async function gatherStreams({ imdbId, mediaType, season, episode, publicBaseUrl
     {
       name: "VidLink",
       run: () =>
-        canUseTmdbSources ? getVidLinkStreams(tmdb.tmdbId, mediaType, season, episode) : [],
+        canUseTmdbSources
+          ? getVidLinkStreams(tmdb.tmdbId, mediaType, season, episode, publicBaseUrl)
+          : [],
     },
     {
       name: "AnimeCloud",
@@ -2478,6 +2551,104 @@ async function handleAnimeCloudProxyRequest(req, res, requestUrl) {
   }
 }
 
+async function handleVidLinkProxyRequest(req, res, requestUrl) {
+  try {
+    const encodedUrl = requestUrl.searchParams.get("url");
+    const targetUrl = encodedUrl ? decodeUrlParam(encodedUrl) : "";
+    if (!targetUrl) {
+      res.writeHead(400, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "text/plain; charset=utf-8",
+      });
+      res.end("Missing VidLink target URL");
+      return;
+    }
+
+    const extraHeaders = extractVidLinkRequestHeaders(targetUrl);
+    const upstreamHeaders = {
+      "user-agent": USER_AGENT,
+      accept: req.headers.accept || "*/*",
+      ...Object.fromEntries(
+        Object.entries(extraHeaders).map(([key, value]) => [String(key).toLowerCase(), value])
+      ),
+    };
+    if (req.headers.range) {
+      upstreamHeaders.range = req.headers.range;
+    }
+
+    const upstream = await fetch(targetUrl, {
+      method: req.method === "HEAD" ? "HEAD" : "GET",
+      headers: upstreamHeaders,
+    });
+
+    if (!upstream.ok) {
+      res.writeHead(upstream.status, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": upstream.headers.get("content-type") || "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      const body = await upstream.text().catch(() => "");
+      res.end(body);
+      return;
+    }
+
+    const contentType = upstream.headers.get("content-type") || "";
+    const isPlaylist =
+      /\.m3u8($|\?)/i.test(targetUrl) ||
+      /mpegurl|vnd\.apple\.mpegurl/i.test(contentType);
+
+    if (isPlaylist && req.method !== "HEAD") {
+      const playlist = await upstream.text();
+      const rewritten = rewriteM3u8ForProxy(playlist, targetUrl, getPublicBaseUrl(req));
+      res.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+        "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+      });
+      res.end(rewritten);
+      return;
+    }
+
+    const headers = {
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+      "Content-Type": contentType || "application/octet-stream",
+      "Accept-Ranges": upstream.headers.get("accept-ranges") || "bytes",
+    };
+
+    const contentLength = upstream.headers.get("content-length");
+    const contentRange = upstream.headers.get("content-range");
+    if (contentLength) headers["Content-Length"] = contentLength;
+    if (contentRange) headers["Content-Range"] = contentRange;
+
+    res.writeHead(upstream.status, headers);
+
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch (error) {
+    res.writeHead(502, {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    res.end(`VidLink proxy error: ${stripHtml(error.message)}`);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (!req.url) {
@@ -2518,6 +2689,11 @@ const server = http.createServer(async (req, res) => {
 
     if (requestUrl.pathname === "/proxy/animecloud.mp4") {
       await handleAnimeCloudProxyRequest(req, res, requestUrl);
+      return;
+    }
+
+    if (requestUrl.pathname === "/proxy/vidlink.m3u8") {
+      await handleVidLinkProxyRequest(req, res, requestUrl);
       return;
     }
 
