@@ -1118,7 +1118,15 @@ async function getVideasyStreams(title, tmdbId, imdbId, year, mediaType, season,
     }
   }
 
-  return allStreams;
+  // Some Videasy hosts (e.g. ArCh) return many near-duplicate Auto playlists.
+  // Keep only the first one to reduce noise.
+  let seenArch = false;
+  return allStreams.filter((stream) => {
+    if (stream.name !== "ArCh") return true;
+    if (seenArch) return false;
+    seenArch = true;
+    return true;
+  });
 }
 
 function extractXpassBackups(html) {
