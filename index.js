@@ -1131,22 +1131,61 @@ async function getVixsrcStreams(tmdbId, mediaType, season, episode, publicBaseUr
     Origin: VIXSRC_API,
   };
 
-  const variants = await parseM3u8Variants(masterPlaylistUrl, headers);
-  if (variants.length) {
-    return variants.map((variant) =>
-      buildStream(
-        "Vixsrc",
-        normalizeStreamTitle({ quality: variant.quality }),
-        buildVixsrcProxyUrl(variant.url, publicBaseUrl),
-        variant.quality,
-        {
-          externalUrl: pageUrl,
-          behaviorHints: {
-            notWebReady: false,
-          },
-        }
-      )
-    );
+  const details = await parseM3u8MasterDetails(masterPlaylistUrl, headers);
+  if (details.variants.length) {
+    const emitted = [];
+    for (const variant of details.variants.filter((entry) => entry.quality)) {
+      const audioTracks =
+        details.audioTracks.filter((track) => !variant.audioGroup || track.groupId === variant.audioGroup) ||
+        details.audioTracks;
+
+      if (audioTracks.length) {
+        emitted.push(
+          buildStream(
+            "Vixsrc",
+            normalizeStreamTitle({ quality: variant.quality }),
+            buildMoxMergedPlaylistUrl({
+              videoUrl: buildVixsrcProxyUrl(variant.url, publicBaseUrl),
+              audioTracks: audioTracks.map((track) => ({
+                url: buildVixsrcProxyUrl(track.url, publicBaseUrl),
+                language: track.language || "",
+                name: track.name || "",
+                isDefault: !!track.isDefault,
+              })),
+              quality: variant.quality,
+              publicBaseUrl,
+            }),
+            variant.quality,
+            {
+              externalUrl: pageUrl,
+              behaviorHints: {
+                notWebReady: false,
+              },
+            }
+          )
+        );
+        continue;
+      }
+
+      emitted.push(
+        buildStream(
+          "Vixsrc",
+          normalizeStreamTitle({ quality: variant.quality }),
+          buildVixsrcProxyUrl(variant.url, publicBaseUrl),
+          variant.quality,
+          {
+            externalUrl: pageUrl,
+            behaviorHints: {
+              notWebReady: false,
+            },
+          }
+        )
+      );
+    }
+
+    if (emitted.length) {
+      return emitted;
+    }
   }
 
   return [
