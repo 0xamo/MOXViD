@@ -1,9 +1,9 @@
 services:
   - type: web
-    name: stremio-vidlink-addon
+    name: moxvid
     env: node
     plan: free
-    rootDir: stremio-vidlink-addon
+    rootDir: MOXViD
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
