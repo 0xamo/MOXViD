@@ -19,10 +19,12 @@ const DYNAMIC_URLS_API =
   "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json";
 const ALLWISH_API = "https://all-wish.me";
 const VIDSRCCC_API = "https://vidsrc.cc";
+const VIDEASY_API = "https://api.videasy.net";
 const WITANIME_BACKEND = "http://145.241.158.129:3111";
 const ANIMECLOUD_BACKEND = "http://145.241.158.129:3112/animecloud/streams";
 const ANIMEKAI_DB_API = "https://enc-dec.app/db/kai";
 const ANIMEKAI_AJAX = "https://animekai.to/ajax";
+const XPASS_API = "https://play.xpass.top";
 const HIANIME_APIS = [
   "https://hianimes.su",
   "https://hianimes.biz",
@@ -40,7 +42,7 @@ const manifest = {
   version: "0.6.0",
   name: "MOXViD",
   description:
-    "Stremio addon using Scrennnifu, Wind, Voxzer, MOX, VidLink, AllAnime, and AnimeCloud.",
+    "Stremio addon using Nightbreeze, Wind, Voxzer, MOX, Scrennnifu, Xpass, Videasy, VidLink, AllAnime, and AnimeCloud.",
   resources: ["stream"],
   types: ["movie", "series", "anime"],
   idPrefixes: ["tt", "kitsu"],
@@ -445,20 +447,30 @@ function dedupeStreams(streams) {
 }
 
 function orderStreams(streams, isAnime) {
+  const xpassFamily = ["TikViD", "VipViD"];
+  const videasyNames = new Set(["10017", "SuNCren", "Wrong", "Lizer", "ArCh", "Videasy"]);
+  const isVideasyFamily = (name) =>
+    videasyNames.has(String(name || "")) || /\.workers\.dev$/i.test(String(name || ""));
   const animePriority = [
-    "Scrennnifu",
+    "Nightbreeze",
     "Wind",
     "Voxzer",
     "MOX",
+    "Scrennnifu",
+    "Xpass",
+    "Videasy",
     "AllAnime",
     "VidLink",
     "AnimeCloud",
   ];
   const standardPriority = [
-    "Scrennnifu",
+    "Nightbreeze",
     "Wind",
     "Voxzer",
     "MOX",
+    "Scrennnifu",
+    "Xpass",
+    "Videasy",
     "VidLink",
     "AnimeCloud",
     "AllAnime",
@@ -467,9 +479,30 @@ function orderStreams(streams, isAnime) {
   const priorityMap = new Map(priority.map((name, index) => [name, index]));
 
   return [...streams].sort((a, b) => {
-    const ap = priorityMap.get(a.name) ?? 999;
-    const bp = priorityMap.get(b.name) ?? 999;
+    const aName = String(a.name || "");
+    const bName = String(b.name || "");
+    const aBase =
+      aName.startsWith("Xpass ") || xpassFamily.includes(aName) ? "Xpass" : aName;
+    const bBase =
+      bName.startsWith("Xpass ") || xpassFamily.includes(bName) ? "Xpass" : bName;
+    const normalizedABase = isVideasyFamily(aName) ? "Videasy" : aBase;
+    const normalizedBBase = isVideasyFamily(bName) ? "Videasy" : bBase;
+    const ap = priorityMap.get(normalizedABase) ?? 999;
+    const bp = priorityMap.get(normalizedBBase) ?? 999;
     if (ap !== bp) return ap - bp;
+    if (normalizedABase === "Videasy" && normalizedBBase === "Videasy" && aName !== bName) {
+      return aName.localeCompare(bName);
+    }
+    if (aBase === "Xpass" && bBase === "Xpass") {
+      const aServerOrder = xpassFamily.indexOf(aName);
+      const bServerOrder = xpassFamily.indexOf(bName);
+      if (aServerOrder !== -1 || bServerOrder !== -1) {
+        return (aServerOrder === -1 ? 999 : aServerOrder) - (bServerOrder === -1 ? 999 : bServerOrder);
+      }
+      const aServer = Number(aName.match(/^Xpass\s+(\d+)/i)?.[1] || 999);
+      const bServer = Number(bName.match(/^Xpass\s+(\d+)/i)?.[1] || 999);
+      if (aServer !== bServer) return aServer - bServer;
+    }
     const aq = a.quality || 0;
     const bq = b.quality || 0;
     return bq - aq;
@@ -488,6 +521,74 @@ function buildStream(provider, title, url, quality, extra = {}) {
     externalUrl: extra.externalUrl,
     quality,
   };
+}
+
+function detectCamSource(...parts) {
+  const text = parts
+    .map((part) => String(part || "").toLowerCase())
+    .join(" ");
+  return /\b(cam|hdcam|hd-cam|ts|telesync|tc|telecine|hqcam|hdts)\b/.test(text);
+}
+
+function normalizeXpassStreams(streams) {
+  const allowedHosts = ["https://tik.1x2.space", "https://vip.1x2.space"];
+  const filteredStreams = streams.filter((stream) =>
+    allowedHosts.some((host) => String(stream?.url || "").startsWith(host))
+  );
+  const labelStats = new Map();
+  const preferredNames = ["TikViD", "VipViD"];
+  filteredStreams.forEach((stream, index) => {
+    const rawLabel = String(stream.xpassLabel || "").trim() || "Auto";
+    const current = labelStats.get(rawLabel) || {
+      bestQuality: -1,
+      firstIndex: index,
+    };
+    current.bestQuality = Math.max(current.bestQuality, stream.quality || 0);
+    current.firstIndex = Math.min(current.firstIndex, index);
+    labelStats.set(rawLabel, current);
+  });
+
+  const serverMap = new Map(
+    [...labelStats.entries()]
+      .sort((a, b) => {
+        if (a[1].bestQuality !== b[1].bestQuality) {
+          return b[1].bestQuality - a[1].bestQuality;
+        }
+        return a[1].firstIndex - b[1].firstIndex;
+      })
+      .map(([label], index) => [label, index + 1])
+  );
+
+  const normalized = filteredStreams.map((stream) => {
+    const rawLabel = String(stream.xpassLabel || "").trim() || "Auto";
+    const serverNumber = serverMap.get(rawLabel);
+    const qualityLabel = stream.quality ? `${stream.quality}p` : "Auto";
+    const isCam = detectCamSource(rawLabel, stream.url, stream.externalUrl);
+    const providerName = /mov/i.test(rawLabel)
+      ? "TikViD"
+      : /tik/i.test(rawLabel)
+      ? "TikViD"
+      : /vid/i.test(rawLabel)
+      ? "VipViD"
+      : /vip/i.test(rawLabel)
+      ? "VipViD"
+      : preferredNames[(serverNumber || 1) - 1] || `Xpass ${serverNumber}`;
+    return {
+      ...stream,
+      name: providerName,
+      title: [qualityLabel, isCam ? "CAM" : null]
+        .filter(Boolean)
+        .join(" "),
+      serverOrder: serverNumber,
+    };
+  });
+
+  return normalized.sort((a, b) => {
+    const aq = a.quality || 0;
+    const bq = b.quality || 0;
+    if (aq !== bq) return bq - aq;
+    return (a.serverOrder || 999) - (b.serverOrder || 999);
+  });
 }
 
 async function withTimeout(promise, ms, label) {
@@ -699,6 +800,8 @@ async function getNoTorrentStreams(imdbId, mediaType, season, episode, publicBas
 
     const sourceName = /scrennnifu\.click/i.test(stream.url)
       ? "Scrennnifu"
+      : /p\.10020\.workers\.dev\/nightbreeze17\.site/i.test(stream.url)
+      ? "Nightbreeze"
       : /wind\.10018\.workers\.dev/i.test(stream.url)
       ? "Wind"
       : /(?:^https?:\/\/)?(?:astream-[^/]+\.)?voxzer\.org/i.test(stream.url)
@@ -877,6 +980,260 @@ async function getVidLinkStreams(tmdbId, mediaType, season, episode, publicBaseU
   }
 
   return [buildStream("VidLink", "Auto", buildVidLinkProxyUrl(playlist, publicBaseUrl), null, { externalUrl })];
+}
+
+function encodeVideasyTitle(title) {
+  return encodeURIComponent(encodeURIComponent(String(title || ""))).replace(/\+/g, "%20");
+}
+
+function getVideasySourceName(url) {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./i, "");
+    if (/vidplus\.dev$/i.test(hostname) || /uskevinpowell89\.workers\.dev$/i.test(hostname)) {
+      return null;
+    }
+    if (/begin\.10017\.workers\.dev$/i.test(hostname)) {
+      return "10017";
+    }
+    if (/main-mp4\.jamesuncren\.workers\.dev$/i.test(hostname)) {
+      return "SuNCren";
+    }
+    if (/lizer123\.site$/i.test(hostname)) {
+      return "Lizer";
+    }
+    if (/i-?arch-?400/i.test(hostname)) {
+      return "ArCh";
+    }
+    if (/wrong/i.test(hostname)) {
+      return "Wrong";
+    }
+    const parts = hostname.split(".").filter(Boolean);
+    if (parts.length >= 4 && hostname.endsWith(".workers.dev")) {
+      const label = parts[0]
+        .split("-")
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+      return /wrong/i.test(label) ? "Wrong" : label;
+    }
+    if (parts.length >= 3) {
+      const label = parts[0]
+        .split("-")
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+      if (/lizer123/i.test(label)) return "Lizer";
+      if (/wrong/i.test(label)) return "Wrong";
+      if (/arch\s*400/i.test(label)) return "ArCh";
+      return label;
+    }
+    return hostname;
+  } catch (_) {
+    return "Videasy";
+  }
+}
+
+async function getVideasyStreams(title, tmdbId, imdbId, year, mediaType, season, episode) {
+  if (!title) return [];
+
+  const headers = {
+    Accept: "*/*",
+    "User-Agent": USER_AGENT,
+    Origin: "https://cineby.gd",
+    Referer: "https://cineby.gd/",
+  };
+  const servers = [
+    "myflixerzupcloud",
+    "1movies",
+    "moviebox",
+    "primewire",
+    "m4uhd",
+    "hdmovie",
+    "cdn",
+    "primesrcme",
+  ];
+
+  const encodedTitle = encodeVideasyTitle(title);
+  const allStreams = [];
+
+  for (const server of servers) {
+    const queryParts = [
+      `title=${encodedTitle}`,
+      `mediaType=${encodeURIComponent(mediaType === "movie" ? "movie" : "tv")}`,
+      `year=${encodeURIComponent(String(year || ""))}`,
+      `tmdbId=${encodeURIComponent(String(tmdbId || ""))}`,
+      `imdbId=${encodeURIComponent(String(imdbId || ""))}`,
+    ];
+    if (mediaType !== "movie") {
+      queryParts.push(`episodeId=${encodeURIComponent(String(Number(episode || 1)))}`);
+      queryParts.push(`seasonId=${encodeURIComponent(String(Number(season || 1)))}`);
+    }
+
+    const encryptedText = await fetchText(`${VIDEASY_API}/${server}/sources-with-title?${queryParts.join("&")}`, {
+      headers,
+    }).catch(() => null);
+    if (!encryptedText) continue;
+
+    const payload = await fetchJson(`${MULTI_DECRYPT_API}/dec-videasy`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: encryptedText,
+        id: tmdbId,
+      }),
+    }).catch(() => null);
+
+    const sources = payload?.result?.sources;
+    if (!Array.isArray(sources) || !sources.length) continue;
+
+    for (const source of sources) {
+      const sourceUrl = source?.url;
+      if (!sourceUrl) continue;
+      const quality = parseQualityFromText(source?.quality) || null;
+      const typeLabel = sourceUrl.includes(".m3u8")
+        ? "HLS"
+        : /\.(mp4|mkv)(\?|$)/i.test(sourceUrl)
+        ? "MP4"
+        : null;
+      const providerName = getVideasySourceName(sourceUrl);
+      if (!providerName) continue;
+      allStreams.push(
+        buildStream(
+          providerName,
+          [quality ? `${quality}p` : "Auto", typeLabel].filter(Boolean).join(" "),
+          sourceUrl,
+          quality,
+          {
+            externalUrl: sourceUrl,
+            behaviorHints: {
+              proxyHeaders: {
+                request: headers,
+              },
+            },
+          }
+        )
+      );
+    }
+  }
+
+  return allStreams;
+}
+
+function extractXpassBackups(html) {
+  const raw =
+    String(html || "").match(/var backups=(\[[\s\S]*?])<\/script>/i)?.[1] ||
+    String(html || "").match(/var backups=(\[[\s\S]*?])\s*var /i)?.[1];
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed
+          .map((entry) => ({
+            name: String(entry?.name || "").trim(),
+            url: String(entry?.url || "").trim(),
+          }))
+          .filter((entry) => entry.name && entry.url)
+      : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+async function getXpassStreams(tmdbId, mediaType, season, episode) {
+  const embedUrl =
+    mediaType === "movie"
+      ? `${XPASS_API}/e/movie/${tmdbId}`
+      : `${XPASS_API}/e/tv/${tmdbId}/${season}/${episode}`;
+  const html = await fetchText(embedUrl, {
+    headers: {
+      Referer: `${XPASS_API}/`,
+      Origin: XPASS_API,
+    },
+  });
+  const backups = extractXpassBackups(html).slice(0, 3);
+  const settled = await Promise.allSettled(
+    backups.map(async (backup) => {
+      const fullUrl = /^https?:/i.test(backup.url)
+        ? backup.url
+        : `${XPASS_API}${backup.url}`;
+      const payload = await fetchJson(fullUrl, {
+        headers: {
+          Referer: `${XPASS_API}/`,
+          Origin: XPASS_API,
+        },
+      });
+      const sources = payload?.playlist?.[0]?.sources;
+      if (!Array.isArray(sources)) return [];
+
+      const sourceSettled = await Promise.allSettled(
+        sources.map(async (source) => {
+          const file = String(source?.file || "").trim();
+          if (!/^https?:/i.test(file)) return [];
+          const label = String(source?.label || backup.name || "Auto").trim();
+          const lowerType = String(source?.type || "").toLowerCase();
+          const isM3u8 = lowerType.includes("hls") || file.includes(".m3u8");
+
+          if (isM3u8) {
+            const variants = await parseM3u8Variants(file, {
+              Referer: `${XPASS_API}/`,
+              Origin: XPASS_API,
+            });
+            if (variants.length) {
+              return variants.map((variant) => ({
+                ...buildStream(
+                  "Xpass",
+                  [variant.quality ? `${variant.quality}p` : "Auto", label].filter(Boolean).join(" "),
+                  variant.url,
+                  variant.quality,
+                  {
+                    externalUrl: embedUrl,
+                    behaviorHints: {
+                      proxyHeaders: {
+                        request: {
+                          Referer: `${XPASS_API}/`,
+                          Origin: XPASS_API,
+                        },
+                      },
+                    },
+                  }
+                ),
+                xpassLabel: label,
+              }));
+            }
+          }
+
+          return [
+            {
+              ...buildStream("Xpass", label, file, parseQualityFromText(label), {
+                externalUrl: embedUrl,
+                behaviorHints: {
+                  proxyHeaders: {
+                    request: {
+                      Referer: `${XPASS_API}/`,
+                      Origin: XPASS_API,
+                    },
+                  },
+                },
+              }),
+              xpassLabel: label,
+            },
+          ];
+        })
+      );
+
+      return sourceSettled
+        .filter((result) => result.status === "fulfilled")
+        .flatMap((result) => result.value);
+    })
+  );
+
+  return normalizeXpassStreams(
+    settled
+    .filter((result) => result.status === "fulfilled")
+    .flatMap((result) => result.value)
+  );
 }
 
 function extractVidLinkRequestHeaders(targetUrl) {
@@ -1741,8 +2098,14 @@ async function netMirrorPlaylist(contentId, title, platform, cookie) {
   const ottMap = { netflix: "nf", primevideo: "pv", disney: "hs" };
   const ott = ottMap[platform] || "nf";
   const cookieHeader = `t_hash_t=${cookie}; user_token=233123f803cf02184bf6c67e149cdd50; hd=on; ott=${ott}`;
+  const endpoint =
+    platform === "primevideo"
+      ? `${NETMIRROR_BASE}/pv/playlist.php`
+      : platform === "disney"
+      ? `${NETMIRROR_BASE}/mobile/hs/playlist.php`
+      : `${NETMIRROR_BASE}/tv/playlist.php`;
   const payload = await fetchJson(
-    `${NETMIRROR_BASE}/tv/playlist.php?id=${encodeURIComponent(contentId)}&t=${encodeURIComponent(
+    `${endpoint}?id=${encodeURIComponent(contentId)}&t=${encodeURIComponent(
       title
     )}&tm=${Math.floor(Date.now() / 1000)}`,
     {
@@ -1755,46 +2118,59 @@ async function netMirrorPlaylist(contentId, title, platform, cookie) {
   return Array.isArray(payload) ? payload : [];
 }
 
+function getNetMirrorUrlBase(platform) {
+  return platform === "primevideo"
+    ? `${NETMIRROR_BASE}/pv`
+    : platform === "disney"
+    ? `${NETMIRROR_BASE}/mobile/hs`
+    : NETMIRROR_BASE;
+}
+
 async function getNetMirrorStreams(tmdb, mediaType, season, episode) {
   const cookie = await getNetMirrorCookie();
   if (!cookie) return [];
   const title = tmdb.title || tmdb.originalTitle;
-  const query = tmdb.year ? `${title} ${tmdb.year}` : title;
+  const queries = Array.from(
+    new Set([tmdb.year ? `${title} ${tmdb.year}` : null, title].filter(Boolean))
+  );
   const platforms = ["netflix", "primevideo", "disney"];
   for (const platform of platforms) {
-    const results = await netMirrorSearch(query, platform, cookie).catch(() => []);
-    const selected = results
-      .map((item) => ({
-        id: item?.id,
-        title: item?.t,
-        score: titleScore(item?.t, title),
-      }))
-      .filter((item) => item.id && item.score >= 60)
-      .sort((a, b) => b.score - a.score)[0];
-    if (!selected?.id) continue;
-    const playlist = await netMirrorPlaylist(selected.id, title, platform, cookie);
-    const streams = [];
-    for (const item of playlist) {
-      for (const source of item?.sources || []) {
-        let url = source?.file || "";
-        if (!url) continue;
-        url = url.replace("/tv/", "/");
-        if (url.startsWith("/")) url = `${NETMIRROR_BASE}${url}`;
-        const quality =
-          parseQualityFromText(source?.label || source?.file || "") ||
-          qualityRank(source?.label || "");
-        streams.push(
-          buildStream(
-            "NetMirror",
-            `NetMirror ${platform} ${quality ? `${quality}p` : "Auto"}`,
-            url,
-            quality || null,
-            { externalUrl: url }
-          )
-        );
+    for (const query of queries) {
+      const results = await netMirrorSearch(query, platform, cookie).catch(() => []);
+      const selected = results
+        .map((item) => ({
+          id: item?.id,
+          title: item?.t,
+          score: titleScore(item?.t, title),
+        }))
+        .filter((item) => item.id && item.score >= 60)
+        .sort((a, b) => b.score - a.score)[0];
+      if (!selected?.id) continue;
+      const playlist = await netMirrorPlaylist(selected.id, title, platform, cookie);
+      const streams = [];
+      for (const item of playlist) {
+        for (const source of item?.sources || []) {
+          let url = source?.file || "";
+          if (!url) continue;
+          if (url.startsWith("/")) {
+            url = `${getNetMirrorUrlBase(platform)}${url}`;
+          }
+          const quality =
+            parseQualityFromText(source?.label || source?.file || "") ||
+            qualityRank(source?.label || "");
+          streams.push(
+            buildStream(
+              "NetMirror",
+              `${platform} ${quality ? `${quality}p` : "Auto"}`,
+              url,
+              quality || null,
+              { externalUrl: url }
+            )
+          );
+        }
       }
+      if (streams.length) return streams;
     }
-    if (streams.length) return streams;
   }
   return [];
 }
@@ -2296,6 +2672,28 @@ async function gatherStreams({ imdbId, mediaType, season, episode, publicBaseUrl
       name: "NoTorrent",
       run: () =>
         canUseImdbSources ? getNoTorrentStreams(imdbId, mediaType, season, episode, publicBaseUrl) : [],
+    },
+    {
+      name: "Xpass",
+      run: () =>
+        canUseTmdbSources
+          ? getXpassStreams(tmdb.tmdbId, mediaType, season, episode)
+          : [],
+    },
+    {
+      name: "Videasy",
+      run: () =>
+        canUseTmdbSources
+          ? getVideasyStreams(
+              tmdb.originalTitle || tmdb.title,
+              tmdb.tmdbId,
+              imdbId,
+              tmdb.year,
+              mediaType,
+              season,
+              episode
+            )
+          : [],
     },
     {
       name: "VidLink",
