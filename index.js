@@ -19,6 +19,7 @@ const DYNAMIC_URLS_API =
   "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json";
 const ALLWISH_API = "https://all-wish.me";
 const VIDSRCCC_API = "https://vidsrc.cc";
+const VIXSRC_API = "https://vixsrc.to";
 const VIDEASY_API = "https://api.videasy.net";
 const WITANIME_BACKEND = "http://145.241.158.129:3111";
 const ANIMECLOUD_BACKEND = "http://145.241.158.129:3112/animecloud/streams";
@@ -39,10 +40,10 @@ const NETMIRROR_BASE = "https://net51.cc";
 
 const manifest = {
   id: "org.codex.moxvid",
-  version: "0.6.1",
+  version: "0.6.2",
   name: "MOXViD",
   description:
-    "Stremio addon using Nightbreeze, Wind, Voxzer, MOX, Scrennnifu, Xpass, Videasy, VidLink, AllAnime, and AnimeCloud.",
+    "Stremio addon using Nightbreeze, Wind, Voxzer, MOX, Scrennnifu, Vixsrc, Videasy, AllAnime, and AnimeCloud.",
   resources: ["stream"],
   types: ["movie", "series", "anime"],
   idPrefixes: ["tt", "kitsu"],
@@ -447,33 +448,31 @@ function dedupeStreams(streams) {
 }
 
 function orderStreams(streams, isAnime) {
-  const xpassFamily = ["TikViD", "VipViD"];
+  const xpassFamily = [];
   const videasyNames = new Set(["10017", "SuNCren", "Wrong", "Lizer", "ArCh", "Videasy"]);
   const isVideasyFamily = (name) =>
     videasyNames.has(String(name || "")) || /\.workers\.dev$/i.test(String(name || ""));
   const animePriority = [
     "Nightbreeze",
-    "Wind",
     "Voxzer",
     "MOX",
     "Scrennnifu",
-    "Xpass",
+    "Vixsrc",
     "Videasy",
     "AllAnime",
-    "VidLink",
     "AnimeCloud",
+    "Wind",
   ];
   const standardPriority = [
     "Nightbreeze",
-    "Wind",
     "Voxzer",
     "MOX",
     "Scrennnifu",
-    "Xpass",
+    "Vixsrc",
     "Videasy",
-    "VidLink",
     "AnimeCloud",
     "AllAnime",
+    "Wind",
   ];
   const priority = isAnime ? animePriority : standardPriority;
   const priorityMap = new Map(priority.map((name, index) => [name, index]));
@@ -554,7 +553,7 @@ function getLogoSvg() {
   ].join("");
 }
 
-function normalizeXpassStreams(streams) {
+function normalizeXpassStreams(streams, publicBaseUrl, xpassContext) {
   const allowedHosts = ["https://tik.1x2.space", "https://vip.1x2.space"];
   const filteredStreams = streams.filter((stream) =>
     allowedHosts.some((host) => String(stream?.url || "").startsWith(host))
@@ -597,9 +596,26 @@ function normalizeXpassStreams(streams) {
       : /vip/i.test(rawLabel)
       ? "VipViD"
       : preferredNames[(serverNumber || 1) - 1] || `Xpass ${serverNumber}`;
+    const proxiedUrl =
+      publicBaseUrl && xpassContext
+        ? buildXpassPlayUrl({
+            publicBaseUrl,
+            tmdbId: xpassContext.tmdbId,
+            mediaType: xpassContext.mediaType,
+            season: xpassContext.season,
+            episode: xpassContext.episode,
+            providerName,
+            quality: stream.quality || 0,
+          })
+        : stream.url;
     return {
       ...stream,
       name: providerName,
+      url: proxiedUrl,
+      behaviorHints: {
+        ...(stream.behaviorHints || {}),
+        notWebReady: false,
+      },
       title: [qualityLabel, isCam ? "CAM" : null]
         .filter(Boolean)
         .join(" "),
@@ -752,6 +768,34 @@ function buildVidLinkProxyUrl(targetUrl, publicBaseUrl) {
   return `${publicBaseUrl}/proxy/vidlink.m3u8?${params.toString()}`;
 }
 
+function buildVixsrcProxyUrl(targetUrl, publicBaseUrl) {
+  const params = new URLSearchParams({
+    url: encodeUrlParam(targetUrl),
+  });
+  return `${publicBaseUrl}/proxy/vixsrc.m3u8?${params.toString()}`;
+}
+
+function buildXpassProxyUrl(targetUrl, publicBaseUrl) {
+  const params = new URLSearchParams({
+    url: encodeUrlParam(targetUrl),
+  });
+  return `${publicBaseUrl}/proxy/xpass.m3u8?${params.toString()}`;
+}
+
+function buildXpassPlayUrl({ publicBaseUrl, tmdbId, mediaType, season, episode, providerName, quality }) {
+  const params = new URLSearchParams({
+    tmdbId: String(tmdbId),
+    mediaType: String(mediaType),
+    provider: String(providerName),
+    quality: String(quality || 0),
+  });
+  if (mediaType !== "movie") {
+    params.set("season", String(Number(season || 1)));
+    params.set("episode", String(Number(episode || 1)));
+  }
+  return `${publicBaseUrl}/play/xpass.m3u8?${params.toString()}`;
+}
+
 function buildSingleVariantMasterPlaylist({ videoUrl, audioTracks, quality }) {
   const bandwidthMap = {
     1080: 6000000,
@@ -799,6 +843,30 @@ function buildSingleVariantMasterPlaylist({ videoUrl, audioTracks, quality }) {
     videoUrl,
     "",
   ].join("\n");
+}
+
+function keepBestWindLadder(streams) {
+  const nonWind = [];
+  const windGroups = new Map();
+
+  for (const stream of streams) {
+    if (stream?.name !== "Wind") {
+      nonWind.push(stream);
+      continue;
+    }
+
+    const groupKey = String(stream.externalUrl || stream.url || "");
+    if (!windGroups.has(groupKey)) {
+      windGroups.set(groupKey, []);
+    }
+    windGroups.get(groupKey).push(stream);
+  }
+
+  if (!windGroups.size) {
+    return streams;
+  }
+  const firstWindGroup = [...windGroups.values()][0];
+  return [...nonWind, ...firstWindGroup];
 }
 
 async function getNoTorrentStreams(imdbId, mediaType, season, episode, publicBaseUrl) {
@@ -933,7 +1001,7 @@ async function getNoTorrentStreams(imdbId, mediaType, season, episode, publicBas
     );
   }
 
-  return streams;
+  return keepBestWindLadder(streams);
 }
 
 async function getVidLinkStreams(tmdbId, mediaType, season, episode, publicBaseUrl) {
@@ -1006,6 +1074,97 @@ async function getVidLinkStreams(tmdbId, mediaType, season, episode, publicBaseU
   return [buildStream("VidLink", "Auto", buildVidLinkProxyUrl(playlist, publicBaseUrl), null, { externalUrl })];
 }
 
+async function getVixsrcStreams(tmdbId, mediaType, season, episode, publicBaseUrl) {
+  const pageUrl =
+    mediaType === "movie"
+      ? `${VIXSRC_API}/movie/${tmdbId}`
+      : `${VIXSRC_API}/tv/${tmdbId}/${season}/${episode}`;
+
+  const html = await fetchText(pageUrl, {
+    headers: {
+      Referer: `${VIXSRC_API}/`,
+      Origin: VIXSRC_API,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
+
+  let masterPlaylistUrl = null;
+
+  if (html.includes("window.masterPlaylist")) {
+    const urlMatch = html.match(/url:\s*['"]([^'"]+)['"]/);
+    const tokenMatch = html.match(/['"]?token['"]?\s*:\s*['"]([^'"]+)['"]/);
+    const expiresMatch = html.match(/['"]?expires['"]?\s*:\s*['"]([^'"]+)['"]/);
+    if (urlMatch && tokenMatch && expiresMatch) {
+      const baseUrl = urlMatch[1];
+      const token = tokenMatch[1];
+      const expires = expiresMatch[1];
+      masterPlaylistUrl = baseUrl.includes("?")
+        ? `${baseUrl}&token=${token}&expires=${expires}&h=1&lang=en`
+        : `${baseUrl}?token=${token}&expires=${expires}&h=1&lang=en`;
+    }
+  }
+
+  if (!masterPlaylistUrl) {
+    const directMatch = html.match(/(https?:\/\/[^'"\s]+\.m3u8[^'"\s]*)/i);
+    if (directMatch) {
+      masterPlaylistUrl = directMatch[1];
+    }
+  }
+
+  if (!masterPlaylistUrl) {
+    const scriptBlocks = html.match(/<script[^>]*>[\s\S]*?<\/script>/gi) || [];
+    for (const script of scriptBlocks) {
+      const streamMatch = script.match(/['"]?(https?:\/\/[^'"\s]+(?:\.m3u8|playlist)[^'"\s]*)/i);
+      if (streamMatch) {
+        masterPlaylistUrl = streamMatch[1];
+        break;
+      }
+    }
+  }
+
+  if (!masterPlaylistUrl) {
+    return [];
+  }
+
+  const headers = {
+    Referer: `${VIXSRC_API}/`,
+    Origin: VIXSRC_API,
+  };
+
+  const variants = await parseM3u8Variants(masterPlaylistUrl, headers);
+  if (variants.length) {
+    return variants.map((variant) =>
+      buildStream(
+        "Vixsrc",
+        normalizeStreamTitle({ quality: variant.quality }),
+        buildVixsrcProxyUrl(variant.url, publicBaseUrl),
+        variant.quality,
+        {
+          externalUrl: pageUrl,
+          behaviorHints: {
+            notWebReady: false,
+          },
+        }
+      )
+    );
+  }
+
+  return [
+    buildStream(
+      "Vixsrc",
+      "Auto",
+      buildVixsrcProxyUrl(masterPlaylistUrl, publicBaseUrl),
+      null,
+      {
+        externalUrl: pageUrl,
+        behaviorHints: {
+          notWebReady: false,
+        },
+      }
+    ),
+  ];
+}
+
 function encodeVideasyTitle(title) {
   return encodeURIComponent(encodeURIComponent(String(title || ""))).replace(/\+/g, "%20");
 }
@@ -1013,7 +1172,11 @@ function encodeVideasyTitle(title) {
 function getVideasySourceName(url) {
   try {
     const hostname = new URL(url).hostname.replace(/^www\./i, "");
-    if (/vidplus\.dev$/i.test(hostname) || /uskevinpowell89\.workers\.dev$/i.test(hostname)) {
+    if (
+      /vidplus\.dev$/i.test(hostname) ||
+      /uskevinpowell89\.workers\.dev$/i.test(hostname) ||
+      /i-cdn-0\.kessy412lad\.com$/i.test(hostname)
+    ) {
       return null;
     }
     if (/begin\.10017\.workers\.dev$/i.test(hostname)) {
@@ -1173,7 +1336,7 @@ function extractXpassBackups(html) {
   }
 }
 
-async function getXpassStreams(tmdbId, mediaType, season, episode) {
+async function getXpassStreams(tmdbId, mediaType, season, episode, publicBaseUrl) {
   const embedUrl =
     mediaType === "movie"
       ? `${XPASS_API}/e/movie/${tmdbId}`
@@ -1265,7 +1428,7 @@ async function getXpassStreams(tmdbId, mediaType, season, episode) {
     settled
     .filter((result) => result.status === "fulfilled")
     .flatMap((result) => result.value)
-  );
+  , publicBaseUrl, { tmdbId, mediaType, season, episode });
 }
 
 function extractVidLinkRequestHeaders(targetUrl) {
@@ -1304,19 +1467,28 @@ function buildAbsoluteProxyUrl(baseUrl, relativeUrl, publicBaseUrl) {
   return buildVidLinkProxyUrl(absolute.toString(), publicBaseUrl);
 }
 
-function rewriteM3u8ForProxy(playlist, baseUrl, publicBaseUrl) {
+function buildAbsoluteProxyUrlWith(playlistUrl, relativeUrl, publicBaseUrl, proxyBuilder) {
+  const absolute = new URL(relativeUrl, playlistUrl);
+  return proxyBuilder(absolute.toString(), publicBaseUrl);
+}
+
+function rewriteM3u8ForProxyWith(playlist, baseUrl, publicBaseUrl, proxyBuilder) {
   return playlist
     .split(/\r?\n/)
     .map((line) => {
       if (!line || line.startsWith("#")) {
         const uriMatch = line.match(/URI="([^"]+)"/);
         if (!uriMatch) return line;
-        const proxied = buildAbsoluteProxyUrl(baseUrl, uriMatch[1], publicBaseUrl);
+        const proxied = buildAbsoluteProxyUrlWith(baseUrl, uriMatch[1], publicBaseUrl, proxyBuilder);
         return line.replace(uriMatch[1], proxied);
       }
-      return buildAbsoluteProxyUrl(baseUrl, line, publicBaseUrl);
+      return buildAbsoluteProxyUrlWith(baseUrl, line, publicBaseUrl, proxyBuilder);
     })
     .join("\n");
+}
+
+function rewriteM3u8ForProxy(playlist, baseUrl, publicBaseUrl) {
+  return rewriteM3u8ForProxyWith(playlist, baseUrl, publicBaseUrl, buildVidLinkProxyUrl);
 }
 
 function base64ToBytes(base64) {
@@ -2706,13 +2878,6 @@ async function gatherStreams({ imdbId, mediaType, season, episode, publicBaseUrl
         canUseImdbSources ? getNoTorrentStreams(imdbId, mediaType, season, episode, publicBaseUrl) : [],
     },
     {
-      name: "Xpass",
-      run: () =>
-        canUseTmdbSources
-          ? getXpassStreams(tmdb.tmdbId, mediaType, season, episode)
-          : [],
-    },
-    {
       name: "Videasy",
       run: () =>
         canUseTmdbSources
@@ -2728,10 +2893,10 @@ async function gatherStreams({ imdbId, mediaType, season, episode, publicBaseUrl
           : [],
     },
     {
-      name: "VidLink",
+      name: "Vixsrc",
       run: () =>
         canUseTmdbSources
-          ? getVidLinkStreams(tmdb.tmdbId, mediaType, season, episode, publicBaseUrl)
+          ? getVixsrcStreams(tmdb.tmdbId, mediaType, season, episode, publicBaseUrl)
           : [],
     },
     {
@@ -2936,8 +3101,10 @@ async function handleAnimeCloudProxyRequest(req, res, requestUrl) {
       upstreamHeaders.range = req.headers.range;
     }
 
+    // Some HLS hosts reject HEAD on playlists even though players probe with it.
+    // We always fetch upstream with GET and answer HEAD locally.
     const upstream = await fetch(targetUrl, {
-      method: req.method === "HEAD" ? "HEAD" : "GET",
+      method: "GET",
       headers: upstreamHeaders,
     });
 
@@ -3006,8 +3173,10 @@ async function handleVidLinkProxyRequest(req, res, requestUrl) {
       upstreamHeaders.range = req.headers.range;
     }
 
+    // Xpass playlist hosts often reject HEAD even though players probe with it.
+    // Fetch with GET upstream and satisfy HEAD locally.
     const upstream = await fetch(targetUrl, {
-      method: req.method === "HEAD" ? "HEAD" : "GET",
+      method: "GET",
       headers: upstreamHeaders,
     });
 
@@ -3079,6 +3248,282 @@ async function handleVidLinkProxyRequest(req, res, requestUrl) {
   }
 }
 
+async function handleVixsrcProxyRequest(req, res, requestUrl) {
+  try {
+    const encodedUrl = requestUrl.searchParams.get("url");
+    const targetUrl = encodedUrl ? decodeUrlParam(encodedUrl) : "";
+    if (!targetUrl) {
+      res.writeHead(400, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "text/plain; charset=utf-8",
+      });
+      res.end("Missing Vixsrc target URL");
+      return;
+    }
+
+    if (req.method === "HEAD") {
+      const contentType = /\.m3u8($|\?)/i.test(targetUrl)
+        ? "application/vnd.apple.mpegurl; charset=utf-8"
+        : "application/octet-stream";
+      res.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+        "Content-Type": contentType,
+        "Accept-Ranges": "bytes",
+      });
+      res.end();
+      return;
+    }
+
+    const upstreamHeaders = {
+      "user-agent": USER_AGENT,
+      accept: req.headers.accept || "*/*",
+      referer: `${VIXSRC_API}/`,
+      origin: VIXSRC_API,
+    };
+    if (req.headers.range) {
+      upstreamHeaders.range = req.headers.range;
+    }
+
+    const upstream = await fetch(targetUrl, {
+      method: "GET",
+      headers: upstreamHeaders,
+    });
+
+    if (!upstream.ok) {
+      res.writeHead(upstream.status, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": upstream.headers.get("content-type") || "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      const body = await upstream.text().catch(() => "");
+      res.end(body);
+      return;
+    }
+
+    const contentType = upstream.headers.get("content-type") || "";
+    const isPlaylist =
+      /\.m3u8($|\?)/i.test(targetUrl) ||
+      /mpegurl|vnd\.apple\.mpegurl/i.test(contentType);
+
+    if (isPlaylist) {
+      const playlist = await upstream.text();
+      const rewritten = rewriteM3u8ForProxyWith(
+        playlist,
+        targetUrl,
+        getPublicBaseUrl(req),
+        buildVixsrcProxyUrl
+      );
+      res.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+        "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+      });
+      res.end(rewritten);
+      return;
+    }
+
+    const headers = {
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+      "Content-Type": contentType || "application/octet-stream",
+      "Accept-Ranges": upstream.headers.get("accept-ranges") || "bytes",
+    };
+
+    const contentLength = upstream.headers.get("content-length");
+    const contentRange = upstream.headers.get("content-range");
+    if (contentLength) headers["Content-Length"] = contentLength;
+    if (contentRange) headers["Content-Range"] = contentRange;
+
+    res.writeHead(upstream.status, headers);
+
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch (error) {
+    res.writeHead(502, {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    res.end(`Vixsrc proxy error: ${stripHtml(error.message)}`);
+  }
+}
+
+async function handleXpassProxyRequest(req, res, requestUrl) {
+  try {
+    const encodedUrl = requestUrl.searchParams.get("url");
+    const targetUrl = encodedUrl ? decodeUrlParam(encodedUrl) : "";
+    if (!targetUrl) {
+      res.writeHead(400, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "text/plain; charset=utf-8",
+      });
+      res.end("Missing Xpass target URL");
+      return;
+    }
+
+    if (req.method === "HEAD") {
+      const contentType = /\.m3u8($|\?)/i.test(targetUrl)
+        ? "application/vnd.apple.mpegurl; charset=utf-8"
+        : "application/octet-stream";
+      res.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+        "Content-Type": contentType,
+        "Accept-Ranges": "bytes",
+      });
+      res.end();
+      return;
+    }
+
+    const upstreamHeaders = {
+      "user-agent": USER_AGENT,
+      accept: req.headers.accept || "*/*",
+      referer: `${XPASS_API}/`,
+      origin: XPASS_API,
+    };
+    if (req.headers.range) {
+      upstreamHeaders.range = req.headers.range;
+    }
+
+    const upstream = await fetch(targetUrl, {
+      method: req.method === "HEAD" ? "HEAD" : "GET",
+      headers: upstreamHeaders,
+    });
+
+    if (!upstream.ok) {
+      res.writeHead(upstream.status, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": upstream.headers.get("content-type") || "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      const body = await upstream.text().catch(() => "");
+      res.end(body);
+      return;
+    }
+
+    const contentType = upstream.headers.get("content-type") || "";
+    const isPlaylist =
+      /\.m3u8($|\?)/i.test(targetUrl) ||
+      /mpegurl|vnd\.apple\.mpegurl/i.test(contentType);
+
+    if (isPlaylist && req.method !== "HEAD") {
+      const playlist = await upstream.text();
+      const rewritten = rewriteM3u8ForProxyWith(playlist, targetUrl, getPublicBaseUrl(req), buildXpassProxyUrl);
+      res.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+        "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+      });
+      res.end(rewritten);
+      return;
+    }
+
+    const headers = {
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+      "Content-Type": contentType || "application/octet-stream",
+      "Accept-Ranges": upstream.headers.get("accept-ranges") || "bytes",
+    };
+
+    const contentLength = upstream.headers.get("content-length");
+    const contentRange = upstream.headers.get("content-range");
+    if (contentLength) headers["Content-Length"] = contentLength;
+    if (contentRange) headers["Content-Range"] = contentRange;
+
+    res.writeHead(upstream.status, headers);
+
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch (error) {
+    res.writeHead(502, {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    res.end(`Xpass proxy error: ${stripHtml(error.message)}`);
+  }
+}
+
+async function handleXpassPlayRequest(req, res, requestUrl) {
+  try {
+    const tmdbId = requestUrl.searchParams.get("tmdbId");
+    const mediaType = requestUrl.searchParams.get("mediaType");
+    const season = Number(requestUrl.searchParams.get("season") || 1);
+    const episode = Number(requestUrl.searchParams.get("episode") || 1);
+    const provider = String(requestUrl.searchParams.get("provider") || "");
+    const quality = Number(requestUrl.searchParams.get("quality") || 0);
+
+    if (!tmdbId || !mediaType || !provider) {
+      res.writeHead(400, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "text/plain; charset=utf-8",
+      });
+      res.end("Invalid Xpass play request");
+      return;
+    }
+
+    if (req.method === "HEAD") {
+      res.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+        "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+        "Accept-Ranges": "bytes",
+      });
+      res.end();
+      return;
+    }
+
+    const freshStreams = await getXpassStreams(
+      tmdbId,
+      mediaType,
+      season,
+      episode,
+      null
+    );
+    const match =
+      freshStreams.find((stream) => stream.name === provider && Number(stream.quality || 0) === quality) ||
+      freshStreams.find((stream) => stream.name === provider) ||
+      null;
+
+    if (!match?.url) {
+      res.writeHead(404, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "text/plain; charset=utf-8",
+      });
+      res.end("Fresh Xpass stream not found");
+      return;
+    }
+
+    const proxied = new URL(buildXpassProxyUrl(match.url, getPublicBaseUrl(req)));
+    await handleXpassProxyRequest(req, res, proxied);
+  } catch (error) {
+    res.writeHead(502, {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    res.end(`Xpass play error: ${stripHtml(error.message)}`);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (!req.url) {
@@ -3138,6 +3583,21 @@ const server = http.createServer(async (req, res) => {
 
     if (requestUrl.pathname === "/proxy/vidlink.m3u8") {
       await handleVidLinkProxyRequest(req, res, requestUrl);
+      return;
+    }
+
+    if (requestUrl.pathname === "/proxy/vixsrc.m3u8") {
+      await handleVixsrcProxyRequest(req, res, requestUrl);
+      return;
+    }
+
+    if (requestUrl.pathname === "/proxy/xpass.m3u8") {
+      await handleXpassProxyRequest(req, res, requestUrl);
+      return;
+    }
+
+    if (requestUrl.pathname === "/play/xpass.m3u8") {
+      await handleXpassPlayRequest(req, res, requestUrl);
       return;
     }
 
