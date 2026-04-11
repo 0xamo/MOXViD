@@ -530,6 +530,30 @@ function detectCamSource(...parts) {
   return /\b(cam|hdcam|hd-cam|ts|telesync|tc|telecine|hqcam|hdts)\b/.test(text);
 }
 
+function normalizeStreamTitle(stream) {
+  const quality = stream?.quality || parseQualityFromText(stream?.title) || null;
+  if (!quality) return "Auto";
+  const cam = detectCamSource(stream?.title, stream?.name, stream?.url, stream?.externalUrl);
+  return cam ? `${quality}p CAM` : `${quality}p`;
+}
+
+function getLogoSvg() {
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">`,
+    `<defs>`,
+    `<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">`,
+    `<stop offset="0" stop-color="#ff3d71"/>`,
+    `<stop offset="1" stop-color="#6b5bff"/>`,
+    `</linearGradient>`,
+    `</defs>`,
+    `<rect x="0" y="0" width="256" height="256" rx="56" fill="url(#g)"/>`,
+    `<circle cx="86" cy="120" r="22" fill="#fff" opacity="0.9"/>`,
+    `<circle cx="170" cy="120" r="22" fill="#fff" opacity="0.9"/>`,
+    `<path d="M78 170c16 18 32 26 50 26s34-8 50-26" fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round"/>`,
+    `</svg>`,
+  ].join("");
+}
+
 function normalizeXpassStreams(streams) {
   const allowedHosts = ["https://tik.1x2.space", "https://vip.1x2.space"];
   const filteredStreams = streams.filter((stream) =>
@@ -2749,7 +2773,7 @@ async function gatherStreams({ imdbId, mediaType, season, episode, publicBaseUrl
 
   const streams = orderStreams(dedupeStreams(successful), isAnime).map((stream) => ({
     name: stream.name,
-    title: stream.title,
+    title: normalizeStreamTitle(stream),
     url: stream.url,
     externalUrl: stream.externalUrl,
     behaviorHints: stream.behaviorHints,
@@ -3074,8 +3098,22 @@ const server = http.createServer(async (req, res) => {
 
     const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
+    if (requestUrl.pathname === "/logo.svg") {
+      res.writeHead(200, {
+        "Content-Type": "image/svg+xml; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      });
+      res.end(getLogoSvg());
+      return;
+    }
+
     if (requestUrl.pathname === "/manifest.json") {
-      sendJson(res, 200, manifest);
+      const baseUrl = getPublicBaseUrl(req);
+      sendJson(res, 200, {
+        ...manifest,
+        logo: `${baseUrl}/logo.svg`,
+      });
       return;
     }
 
