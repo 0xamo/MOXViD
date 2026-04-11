@@ -39,7 +39,7 @@ const NETMIRROR_BASE = "https://net51.cc";
 
 const manifest = {
   id: "org.codex.moxvid",
-  version: "0.6.0",
+  version: "0.6.1",
   name: "MOXViD",
   description:
     "Stremio addon using Nightbreeze, Wind, Voxzer, MOX, Scrennnifu, Xpass, Videasy, VidLink, AllAnime, and AnimeCloud.",
